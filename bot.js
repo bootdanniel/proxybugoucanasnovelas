@@ -7,42 +7,55 @@ const API_KEYS = JSON.parse(process.env.AKASH_API_KEYS || '[]');
 async function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
 async function runBot() {
-    console.log(`🤖 Iniciando Bot Akash...`);
+    console.log(`🤖 Iniciando Bot Akash com ${API_KEYS.length} contas...`);
     
-    let chosenKey = null;
-    let currentDeployDseq = null;
+    // 1. VARREDURA COMPLETA: Limpar deploys de TODAS as contas
+    console.log('🧹 Limpando deploys antigos em TODAS as contas...');
+    for (const key of API_KEYS) {
+        try {
+            const headers = { 'x-api-key': key };
+            const deps = await axios.get(`${API_BASE}/deployments`, { headers });
+            const depsList = deps.data && Array.isArray(deps.data.data) ? deps.data.data : [];
+            let count = 0;
+            for (const d of depsList) {
+                // Deleta qualquer deploy que não esteja fechado
+                if (d.state !== 'closed') {
+                    await axios.delete(`${API_BASE}/deployments/${d.dseq}`, { headers });
+                    count++;
+                }
+            }
+            if (count > 0) console.log(`   🗑️ Conta ${key.substring(15, 25)}...: ${count} deploys deletados.`);
+        } catch (e) {}
+    }
 
-    // 1. Escolher conta com saldo > $2.00 (margem de segurança para escrow)
+    console.log('⏳ Aguardando 15 segundos para a Akash devolver o saldo do escrow...');
+    await sleep(15000);
+
+    // 2. Escolher conta com o maior saldo disponível
+    let chosenKey = null;
+    let maxBalance = 0;
+
     for (const key of API_KEYS) {
         try {
             const res = await axios.get(`${API_BASE}/balances`, { headers: { 'x-api-key': key } });
             const balanceUSD = res.data.data.balance / 1000000;
-            if (balanceUSD > 2.00) {
+            if (balanceUSD > maxBalance) {
+                maxBalance = balanceUSD;
                 chosenKey = key;
-                console.log(`✅ Conta com saldo $${balanceUSD.toFixed(2)} escolhida!`);
-                break;
             }
         } catch (e) {}
     }
 
-    if (!chosenKey) { console.error('❌ Nenhuma conta com saldo > $2.00.'); process.exit(1); }
+    if (maxBalance < 0.40) {
+        console.error(`❌ O maior saldo encontrado foi $${maxBalance.toFixed(2)}. Muito baixo.`);
+        process.exit(1);
+    }
+
+    console.log(`✅ Conta escolhida com saldo de $${maxBalance.toFixed(2)}!`);
     const headers = { 'x-api-key': chosenKey, 'Content-Type': 'application/json' };
 
-    // 2. Limpar deploys antigos
-    console.log('🧹 Limpando deploys antigos...');
-    try {
-        const deps = await axios.get(`${API_BASE}/deployments`, { headers });
-        const depsList = deps.data && Array.isArray(deps.data.data) ? deps.data.data : [];
-        for (const d of depsList) {
-            if (d.state === 'active' || d.state === 'open') {
-                await axios.delete(`${API_BASE}/deployments/${d.dseq}`, { headers });
-                await sleep(2000);
-            }
-        }
-    } catch (e) {}
-
-    // 3. Criar deploy (SEM o campo deposit)
-    console.log('🚀 Criando deploy...');
+    // 3. Criar deploy
+    console.log('🚀 Criando novo deploy...');
     const sdl = `
 ---
 version: "2.0"
@@ -68,13 +81,14 @@ profiles:
       pricing:
         proxy:
           denom: uakt
-          amount: 100000
+          amount: 80000
 deployment:
   proxy:
     akash:
       profile: proxy
       count: 1
 `;
+    let currentDeployDseq = null;
     try {
         const createRes = await axios.post(`${API_BASE}/deployments`, { data: { sdl } }, { headers });
         currentDeployDseq = createRes.data.data.dseq;
@@ -95,9 +109,13 @@ deployment:
         } catch (e) {}
     }
 
-    if (bids.length === 0) { await axios.delete(`${API_BASE}/deployments/${currentDeployDseq}`, { headers }); process.exit(1); }
+    if (bids.length === 0) { 
+        console.error('❌ Nenhum bid encontrado.');
+        await axios.delete(`${API_BASE}/deployments/${currentDeployDseq}`, { headers }); 
+        process.exit(1); 
+    }
 
-    // 5. Escolher bid
+    // 5. Escolher o bid mais barato para garantir
     let validBids = bids.map(item => {
         const b = item.bid ? item.bid : item;
         return { provider: b.id ? b.id.provider : b.provider, price: b.price, manifest: item.manifest || (bids[0] && bids[0].manifest) };
@@ -106,15 +124,17 @@ deployment:
     
     let chosenBid = validBids[0];
     console.log(`🤝 Tentando provedor: ${chosenBid.provider.substring(0, 15)}...`);
+    
     try {
         await axios.post(`${API_BASE}/leases`, {
             manifest: chosenBid.manifest,
             leases: [{ dseq: currentDeployDseq, gseq: 1, oseq: 1, provider: chosenBid.provider }]
         }, { headers });
-    } catch (e) { console.error("Erro no lease"); process.exit(1); }
+        console.log('✅ Contrato (Lease) criado!');
+    } catch (e) { console.error("❌ Erro no lease:", e.message); process.exit(1); }
 
-    // 6. Esperar container
-    console.log('⏳ Aguardando container... (máx 60s)');
+    // 6. Esperar container (60s)
+    console.log('⏳ Aguardando container subir (máx 60s)...');
     let isReady = false;
     let providerUri = null;
     for (let i = 0; i < 12; i++) {
