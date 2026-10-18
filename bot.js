@@ -18,15 +18,12 @@ async function runBot() {
             const res = await axios.get(`${API_BASE}/balances`, { headers: { 'x-api-key': key } });
             const balanceUSD = res.data.data.balance / 1000000;
             console.log(`💰 Conta ${key.substring(15, 25)}... tem $${balanceUSD.toFixed(2)}`);
-
             if (balanceUSD > 0.60) {
                 chosenKey = key;
                 console.log(`✅ Conta escolhida!`);
                 break;
             }
-        } catch (e) {
-            console.log(`⚠️ Erro na conta: ${e.message}`);
-        }
+        } catch (e) { console.log(`⚠️ Erro na conta: ${e.message}`); }
     }
 
     if (!chosenKey) {
@@ -41,16 +38,14 @@ async function runBot() {
     try {
         const deps = await axios.get(`${API_BASE}/deployments`, { headers });
         const depsList = deps.data && Array.isArray(deps.data.data) ? deps.data.data : (Array.isArray(deps.data) ? deps.data : []);
-        
         const activeDeps = depsList.filter(d => d && (d.state === 'active' || d.state === 'open'));
         for (const d of activeDeps) {
-            console.log(`Deletando deploy ${d.dseq}...`);
             await axios.delete(`${API_BASE}/deployments/${d.dseq}`, { headers });
             await sleep(2000);
         }
     } catch (e) { console.log(`⚠️ Erro ao limpar: ${e.message}`); }
 
-    // 3. Criar novo deploy
+    // 3. Criar novo deploy (SDL Ajustado para 2 vCPU / 4Gi RAM e Streaming)
     console.log('🚀 Criando novo deploy...');
     const sdl = `
 ---
@@ -62,22 +57,25 @@ services:
       - port: 3000
         to:
           - global: true
+        http_options:
+          proxy:
+            buffering_disable: true
 profiles:
   compute:
     proxy:
       resources:
         cpu:
-          units: 1.5
+          units: 2.0
         memory:
-          size: 3Gi
+          size: 4Gi
         storage:
-          size: 3Gi
+          size: 4Gi
   placement:
     akash:
       pricing:
         proxy:
           denom: uakt
-          amount: 80000
+          amount: 100000
 deployment:
   proxy:
     akash:
@@ -111,7 +109,7 @@ deployment:
         process.exit(1);
     }
 
-    // 5. Escolher bid (CORRIGIDO)
+    // 5. Escolher bid
     let validBids = bids.map(item => {
         const b = item.bid ? item.bid : item;
         return {
@@ -121,18 +119,11 @@ deployment:
         };
     }).filter(b => b.provider && b.price && b.price.amount);
 
-    if (validBids.length === 0) {
-        console.error('❌ Nenhum bid válido com preço encontrado.');
-        await axios.delete(`${API_BASE}/deployments/${currentDeployDseq}`, { headers });
-        process.exit(1);
-    }
-
     validBids.sort((a, b) => parseInt(a.price.amount) - parseInt(b.price.amount));
     let chosenBid = validBids[0];
     if (validBids.length >= 3) chosenBid = validBids[Math.floor(validBids.length / 2)];
-    
-    console.log(`🤝 Aceitando bid do provedor: ${chosenBid.provider}`);
 
+    console.log(`🤝 Aceitando bid do provedor: ${chosenBid.provider}`);
     try {
         await axios.post(`${API_BASE}/leases`, {
             manifest: chosenBid.manifest,
@@ -145,9 +136,10 @@ deployment:
         process.exit(1);
     }
 
-    // 6. Esperar container subir
+    // 6. Esperar container subir (AUMENTADO PARA 300s)
+    console.log('⏳ Aguardando container... (Aumentado para 5 minutos)');
     let isReady = false;
-    for (let i = 0; i < 36; i++) {
+    for (let i = 0; i < 60; i++) { // 60 * 5s = 300s
         await sleep(5000);
         try {
             const statusRes = await axios.get(`${API_BASE}/deployments/${currentDeployDseq}`, { headers });
@@ -160,7 +152,7 @@ deployment:
     }
 
     if (!isReady) {
-        console.error('❌ Container não subiu.');
+        console.error('❌ Container não subiu após 5 minutos.');
         await axios.delete(`${API_BASE}/deployments/${currentDeployDseq}`, { headers });
         process.exit(1);
     }
