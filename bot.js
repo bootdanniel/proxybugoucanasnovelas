@@ -12,7 +12,6 @@ async function runBot() {
     try {
         console.log(`🤖 Iniciando Bot Akash...`);
         
-        // 1. Limpar deploys
         for (const key of API_KEYS) {
             try {
                 const headers = { 'x-api-key': key };
@@ -25,7 +24,6 @@ async function runBot() {
         }
         await sleep(15000);
 
-        // 2. Escolher conta
         let chosenKey = null;
         let maxBalance = 0;
         for (const key of API_KEYS) {
@@ -38,12 +36,13 @@ async function runBot() {
         if (!chosenKey || maxBalance < 0.40) { console.error('❌ Saldo insuficiente.'); process.exit(1); }
         const headers = { 'x-api-key': chosenKey, 'Content-Type': 'application/json' };
 
+        // ALTERADO PARA TAG v1
         const sdl = `
 ---
 version: "2.0"
 services:
   proxy:
-    image: ghcr.io/bootdanniel/proxybugoucanasnovelas:latest
+    image: ghcr.io/bootdanniel/proxybugoucanasnovelas:v1
     expose:
       - port: 3000
         to:
@@ -81,12 +80,8 @@ deployment:
             let manifest = createRes.data.data.manifest;
             
             console.log(`✅ Deploy criado! DSEQ: ${dseq}`);
-            if (!manifest) {
-                console.log("⚠️ Manifest não veio na criação. Abortando.");
-                continue;
-            }
+            if (!manifest) { console.log("⚠️ Manifest não veio."); continue; }
 
-            // Bids
             let bids = [];
             for (let i = 0; i < 12; i++) {
                 await sleep(5000);
@@ -97,12 +92,8 @@ deployment:
                 } catch (e) {}
             }
             
-            if (bids.length === 0) { 
-                await axios.delete(`${API_BASE}/deployments/${dseq}`, { headers }); 
-                continue; 
-            }
+            if (bids.length === 0) { await axios.delete(`${API_BASE}/deployments/${dseq}`, { headers }); continue; }
 
-            // Escolher bid
             let validBids = bids.map(item => {
                 const b = item.bid ? item.bid : item;
                 return { provider: b.id ? b.id.provider : b.provider, price: b.price };
@@ -115,7 +106,7 @@ deployment:
             
             try {
                 await axios.post(`${API_BASE}/leases`, {
-                    manifest: manifest, // <--- AQUI ESTÁ A CORREÇÃO DO MANIFEST
+                    manifest: manifest,
                     leases: [{ dseq: dseq, gseq: 1, oseq: 1, provider: chosenBid.provider }]
                 }, { headers });
                 console.log('✅ Contrato criado!');
@@ -125,10 +116,10 @@ deployment:
                 continue; 
             }
 
-            // Esperar container (180s / 3 minutos)
+            // AUMENTADO PARA 5 MINUTOS (300s)
             let isReady = false;
             let providerUri = null;
-            for (let i = 0; i < 36; i++) {
+            for (let i = 0; i < 60; i++) {
                 await sleep(5000);
                 try {
                     const statusRes = await axios.get(`${API_BASE}/deployments/${dseq}`, { headers });
@@ -138,21 +129,17 @@ deployment:
                         const list = Array.isArray(services) ? services : Object.values(services);
                         for (const svc of list) {
                             if ((Number(svc.ready_replicas) || 0) >= 1 && svc.uris && svc.uris.length > 0) {
-                                isReady = true; 
-                                providerUri = svc.uris[0]; 
-                                break;
+                                isReady = true; providerUri = svc.uris[0]; break;
                             }
                         }
                     }
                     if (isReady) break;
-                    if (i % 6 === 0) console.log(`   ... aguardando container (${i*5}s)`);
+                    if (i % 12 === 0) console.log(`   ... aguardando container (${i*5}s)`);
                 } catch (e) {}
             }
 
             if (isReady) {
                 console.log(`✅ Container rodando! URI: ${providerUri}`);
-                
-                // Buscar URL do túnel (suporta https ou http dependendo do provedor)
                 let baseUrl = providerUri.startsWith('http') ? providerUri : `https://${providerUri}`;
                 
                 for (let i = 0; i < 6; i++) {
@@ -171,15 +158,12 @@ deployment:
 
             if (sucesso) break;
             
-            console.log('❌ Provedor falhou ou tempo esgotado. Limpando para a próxima tentativa...');
+            console.log('❌ Provedor falhou. Limpando...');
             await axios.delete(`${API_BASE}/deployments/${dseq}`, { headers });
             await sleep(5000);
         }
         
-        if (!sucesso) {
-            console.error('❌ Todas as 3 tentativas falharam.');
-            process.exit(1);
-        }
+        if (!sucesso) { console.error('❌ Todas as tentativas falharam.'); process.exit(1); }
         process.exit(0);
     } catch (error) {
         console.error(`❌ Erro crítico: ${error.message}`);
