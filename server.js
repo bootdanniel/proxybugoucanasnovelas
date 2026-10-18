@@ -48,4 +48,5 @@ app.get('/proxy', async (req, res) => {
     }
 });
 
-app.listen(PORT, () => console.log(`Proxy rodando na porta ${PORT}`));
+// OUVINDO EM 0.0.0.0 PARA PERMITIR CONEXÕES EXTERNAS
+app.listen(PORT, '0.0.0.0', () => console.log(`Proxy rodando na porta ${PORT}`));
