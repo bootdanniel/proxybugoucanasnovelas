@@ -12,16 +12,20 @@ async function runBot() {
     let chosenKey = null;
     let currentDeployDseq = null;
 
-    // 1. Escolher conta
+    // 1. Escolher conta com saldo > $2.00 (margem de segurança para escrow)
     for (const key of API_KEYS) {
         try {
             const res = await axios.get(`${API_BASE}/balances`, { headers: { 'x-api-key': key } });
             const balanceUSD = res.data.data.balance / 1000000;
-            if (balanceUSD > 0.60) { chosenKey = key; console.log(`✅ Conta com saldo escolhida!`); break; }
+            if (balanceUSD > 2.00) {
+                chosenKey = key;
+                console.log(`✅ Conta com saldo $${balanceUSD.toFixed(2)} escolhida!`);
+                break;
+            }
         } catch (e) {}
     }
 
-    if (!chosenKey) { console.error('❌ Nenhuma conta com saldo.'); process.exit(1); }
+    if (!chosenKey) { console.error('❌ Nenhuma conta com saldo > $2.00.'); process.exit(1); }
     const headers = { 'x-api-key': chosenKey, 'Content-Type': 'application/json' };
 
     // 2. Limpar deploys antigos
@@ -37,7 +41,7 @@ async function runBot() {
         }
     } catch (e) {}
 
-    // 3. Criar deploy
+    // 3. Criar deploy (SEM o campo deposit)
     console.log('🚀 Criando deploy...');
     const sdl = `
 ---
@@ -72,10 +76,13 @@ deployment:
       count: 1
 `;
     try {
-        const createRes = await axios.post(`${API_BASE}/deployments`, { data: { sdl, deposit: 0.50 } }, { headers });
+        const createRes = await axios.post(`${API_BASE}/deployments`, { data: { sdl } }, { headers });
         currentDeployDseq = createRes.data.data.dseq;
         console.log(`✅ Deploy criado! DSEQ: ${currentDeployDseq}`);
-    } catch (e) { console.error(`❌ Erro: ${e.message}`); process.exit(1); }
+    } catch (e) { 
+        console.error(`❌ Erro ao criar: ${e.response?.status} - ${e.response?.data?.message || e.message}`); 
+        process.exit(1); 
+    }
 
     // 4. Bids
     let bids = [];
@@ -90,17 +97,14 @@ deployment:
 
     if (bids.length === 0) { await axios.delete(`${API_BASE}/deployments/${currentDeployDseq}`, { headers }); process.exit(1); }
 
-    // 5. Tentar bid (pega o primeiro)
+    // 5. Escolher bid
     let validBids = bids.map(item => {
         const b = item.bid ? item.bid : item;
         return { provider: b.id ? b.id.provider : b.provider, price: b.price, manifest: item.manifest || (bids[0] && bids[0].manifest) };
     }).filter(b => b.provider && b.price);
     validBids.sort((a, b) => parseInt(a.price.amount) - parseInt(b.price.amount));
     
-    let isReady = false;
-    let tunnelUrl = null;
     let chosenBid = validBids[0];
-
     console.log(`🤝 Tentando provedor: ${chosenBid.provider.substring(0, 15)}...`);
     try {
         await axios.post(`${API_BASE}/leases`, {
@@ -109,8 +113,9 @@ deployment:
         }, { headers });
     } catch (e) { console.error("Erro no lease"); process.exit(1); }
 
-    // 6. Esperar container e pegar a URI do provedor
+    // 6. Esperar container
     console.log('⏳ Aguardando container... (máx 60s)');
+    let isReady = false;
     let providerUri = null;
     for (let i = 0; i < 12; i++) {
         await sleep(5000);
@@ -133,27 +138,21 @@ deployment:
     }
 
     if (!isReady) { console.error('❌ Container não subiu ou URI não gerada.'); process.exit(1); }
-    console.log(`✅ Container rodando! URI do provedor: ${providerUri}`);
+    console.log(`✅ Container rodando! URI: ${providerUri}`);
 
-    // 7. Consultar o endpoint /tunnel-url do proxy na Akash
-    console.log('🔍 Buscando URL do túnel via HTTP no proxy...');
+    // 7. Consultar /tunnel-url
+    console.log('🔍 Buscando URL do túnel...');
+    let tunnelUrl = null;
     for (let i = 0; i < 12; i++) {
         try {
             const resp = await axios.get(`https://${providerUri}/tunnel-url`, { timeout: 10000 });
-            if (resp.data && resp.data.url) {
-                tunnelUrl = resp.data.url;
-                break;
-            }
-        } catch (e) {
-            console.log(`   ... tentativa ${i+1}: Ainda não disponível (${e.message})`);
-        }
+            if (resp.data && resp.data.url) { tunnelUrl = resp.data.url; break; }
+        } catch (e) {}
         await sleep(5000);
     }
 
-    if (!tunnelUrl) { console.error('❌ URL não encontrada via /tunnel-url.'); process.exit(1); }
-    
+    if (!tunnelUrl) { console.error('❌ URL não encontrada.'); process.exit(1); }
     console.log(`🎉 URL Encontrada: ${tunnelUrl}`);
     fs.writeFileSync('proxy_url.txt', tunnelUrl, 'utf8');
-    console.log('✅ proxy_url.txt salvo com sucesso!');
 }
 runBot();
