@@ -7,55 +7,35 @@ const API_KEYS = JSON.parse(process.env.AKASH_API_KEYS || '[]');
 async function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
 async function runBot() {
-    console.log(`🤖 Iniciando Bot Akash com ${API_KEYS.length} contas...`);
+    console.log(`🤖 Iniciando Bot Akash...`);
     
-    // 1. VARREDURA COMPLETA: Limpar deploys de TODAS as contas
-    console.log('🧹 Limpando deploys antigos em TODAS as contas...');
+    // 1. Limpar deploys de todas as contas
     for (const key of API_KEYS) {
         try {
             const headers = { 'x-api-key': key };
             const deps = await axios.get(`${API_BASE}/deployments`, { headers });
             const depsList = deps.data && Array.isArray(deps.data.data) ? deps.data.data : [];
-            let count = 0;
             for (const d of depsList) {
-                // Deleta qualquer deploy que não esteja fechado
-                if (d.state !== 'closed') {
-                    await axios.delete(`${API_BASE}/deployments/${d.dseq}`, { headers });
-                    count++;
-                }
+                if (d.state !== 'closed') await axios.delete(`${API_BASE}/deployments/${d.dseq}`, { headers });
             }
-            if (count > 0) console.log(`   🗑️ Conta ${key.substring(15, 25)}...: ${count} deploys deletados.`);
         } catch (e) {}
     }
-
-    console.log('⏳ Aguardando 15 segundos para a Akash devolver o saldo do escrow...');
     await sleep(15000);
 
-    // 2. Escolher conta com o maior saldo disponível
+    // 2. Escolher conta com maior saldo
     let chosenKey = null;
     let maxBalance = 0;
-
     for (const key of API_KEYS) {
         try {
             const res = await axios.get(`${API_BASE}/balances`, { headers: { 'x-api-key': key } });
             const balanceUSD = res.data.data.balance / 1000000;
-            if (balanceUSD > maxBalance) {
-                maxBalance = balanceUSD;
-                chosenKey = key;
-            }
+            if (balanceUSD > maxBalance) { maxBalance = balanceUSD; chosenKey = key; }
         } catch (e) {}
     }
-
-    if (maxBalance < 0.40) {
-        console.error(`❌ O maior saldo encontrado foi $${maxBalance.toFixed(2)}. Muito baixo.`);
-        process.exit(1);
-    }
-
-    console.log(`✅ Conta escolhida com saldo de $${maxBalance.toFixed(2)}!`);
+    if (!chosenKey || maxBalance < 0.40) { console.error('❌ Saldo insuficiente.'); process.exit(1); }
     const headers = { 'x-api-key': chosenKey, 'Content-Type': 'application/json' };
 
     // 3. Criar deploy
-    console.log('🚀 Criando novo deploy...');
     const sdl = `
 ---
 version: "2.0"
@@ -88,91 +68,82 @@ deployment:
       profile: proxy
       count: 1
 `;
-    let currentDeployDseq = null;
-    try {
-        const createRes = await axios.post(`${API_BASE}/deployments`, { data: { sdl } }, { headers });
-        currentDeployDseq = createRes.data.data.dseq;
-        console.log(`✅ Deploy criado! DSEQ: ${currentDeployDseq}`);
-    } catch (e) { 
-        console.error(`❌ Erro ao criar: ${e.response?.status} - ${e.response?.data?.message || e.message}`); 
-        process.exit(1); 
-    }
+    const createRes = await axios.post(`${API_BASE}/deployments`, { data: { sdl } }, { headers });
+    const dseq = createRes.data.data.dseq;
+    console.log(`✅ Deploy criado! DSEQ: ${dseq}`);
 
-    // 4. Bids
+    // 4. Aguardar bids
     let bids = [];
     for (let i = 0; i < 12; i++) {
         await sleep(5000);
         try {
-            const bidRes = await axios.get(`${API_BASE}/bids?dseq=${currentDeployDseq}`, { headers });
+            const bidRes = await axios.get(`${API_BASE}/bids?dseq=${dseq}`, { headers });
             bids = bidRes.data.data || [];
             if (bids.length > 0) break;
         } catch (e) {}
     }
+    if (bids.length === 0) { await axios.delete(`${API_BASE}/deployments/${dseq}`, { headers }); process.exit(1); }
 
-    if (bids.length === 0) { 
-        console.error('❌ Nenhum bid encontrado.');
-        await axios.delete(`${API_BASE}/deployments/${currentDeployDseq}`, { headers }); 
-        process.exit(1); 
-    }
-
-    // 5. Escolher o bid mais barato para garantir
+    // 5. Tentar até 3 provedores diferentes
     let validBids = bids.map(item => {
         const b = item.bid ? item.bid : item;
         return { provider: b.id ? b.id.provider : b.provider, price: b.price, manifest: item.manifest || (bids[0] && bids[0].manifest) };
     }).filter(b => b.provider && b.price);
     validBids.sort((a, b) => parseInt(a.price.amount) - parseInt(b.price.amount));
-    
-    let chosenBid = validBids[0];
-    console.log(`🤝 Tentando provedor: ${chosenBid.provider.substring(0, 15)}...`);
-    
-    try {
-        await axios.post(`${API_BASE}/leases`, {
-            manifest: chosenBid.manifest,
-            leases: [{ dseq: currentDeployDseq, gseq: 1, oseq: 1, provider: chosenBid.provider }]
-        }, { headers });
-        console.log('✅ Contrato (Lease) criado!');
-    } catch (e) { console.error("❌ Erro no lease:", e.message); process.exit(1); }
 
-    // 6. Esperar container (60s)
-    console.log('⏳ Aguardando container subir (máx 60s)...');
-    let isReady = false;
-    let providerUri = null;
-    for (let i = 0; i < 12; i++) {
-        await sleep(5000);
+    for (const bid of validBids.slice(0, 3)) {
+        console.log(`🤝 Tentando provedor: ${bid.provider.substring(0, 15)}...`);
         try {
-            const statusRes = await axios.get(`${API_BASE}/deployments/${currentDeployDseq}`, { headers });
-            const leases = statusRes.data?.data?.leases || statusRes.data?.leases || [];
-            if (leases && leases.length > 0) {
-                const services = leases[0].status?.services || {};
-                const list = Array.isArray(services) ? services : Object.values(services);
-                for (const svc of list) {
-                    if ((Number(svc.ready_replicas) || 0) >= 1 && svc.uris && svc.uris.length > 0) {
-                        isReady = true;
-                        providerUri = svc.uris[0];
-                        break;
+            await axios.post(`${API_BASE}/leases`, {
+                manifest: bid.manifest,
+                leases: [{ dseq, gseq: 1, oseq: 1, provider: bid.provider }]
+            }, { headers });
+        } catch (e) { continue; }
+
+        // 6. Esperar container (30s)
+        let isReady = false;
+        let providerUri = null;
+        for (let i = 0; i < 6; i++) {
+            await sleep(5000);
+            try {
+                const statusRes = await axios.get(`${API_BASE}/deployments/${dseq}`, { headers });
+                const leases = statusRes.data?.data?.leases || [];
+                if (leases.length > 0) {
+                    const services = leases[0].status?.services || {};
+                    const list = Array.isArray(services) ? services : Object.values(services);
+                    for (const svc of list) {
+                        if ((Number(svc.ready_replicas) || 0) >= 1 && svc.uris && svc.uris.length > 0) {
+                            isReady = true; providerUri = svc.uris[0]; break;
+                        }
                     }
                 }
+                if (isReady) break;
+            } catch (e) {}
+        }
+
+        if (isReady) {
+            console.log(`✅ Container rodando no provedor ${bid.provider.substring(0, 15)}! URI: ${providerUri}`);
+            // 7. Buscar URL do túnel
+            for (let i = 0; i < 6; i++) {
+                try {
+                    const resp = await axios.get(`https://${providerUri}/tunnel-url`, { timeout: 10000 });
+                    if (resp.data && resp.data.url) {
+                        console.log(`🎉 URL Encontrada: ${resp.data.url}`);
+                        fs.writeFileSync('proxy_url.txt', resp.data.url, 'utf8');
+                        process.exit(0);
+                    }
+                } catch (e) {}
+                await sleep(5000);
             }
-            if (isReady) break;
-        } catch (e) {}
+        } else {
+            console.log(`❌ Provedor ${bid.provider.substring(0, 15)} falhou. Tentando próximo...`);
+            await axios.delete(`${API_BASE}/deployments/${dseq}`, { headers });
+            // Cria novo deploy para o próximo provedor
+            const newD = await axios.post(`${API_BASE}/deployments`, { data: { sdl } }, { headers });
+            dseq = newD.data.data.dseq;
+        }
     }
-
-    if (!isReady) { console.error('❌ Container não subiu ou URI não gerada.'); process.exit(1); }
-    console.log(`✅ Container rodando! URI: ${providerUri}`);
-
-    // 7. Consultar /tunnel-url
-    console.log('🔍 Buscando URL do túnel...');
-    let tunnelUrl = null;
-    for (let i = 0; i < 12; i++) {
-        try {
-            const resp = await axios.get(`https://${providerUri}/tunnel-url`, { timeout: 10000 });
-            if (resp.data && resp.data.url) { tunnelUrl = resp.data.url; break; }
-        } catch (e) {}
-        await sleep(5000);
-    }
-
-    if (!tunnelUrl) { console.error('❌ URL não encontrada.'); process.exit(1); }
-    console.log(`🎉 URL Encontrada: ${tunnelUrl}`);
-    fs.writeFileSync('proxy_url.txt', tunnelUrl, 'utf8');
+    console.error('❌ Todos os provedores falharam.');
+    process.exit(1);
 }
 runBot();
