@@ -40,8 +40,11 @@ async function runBot() {
     console.log('🧹 Limpando deploys antigos...');
     try {
         const deps = await axios.get(`${API_BASE}/deployments`, { headers });
-        const activeDeps = deps.data.data.filter(d => d.state === 'active' || d.state === 'open');
+        const depsList = deps.data && Array.isArray(deps.data.data) ? deps.data.data : (Array.isArray(deps.data) ? deps.data : []);
+        
+        const activeDeps = depsList.filter(d => d && (d.state === 'active' || d.state === 'open'));
         for (const d of activeDeps) {
+            console.log(`Deletando deploy ${d.dseq}...`);
             await axios.delete(`${API_BASE}/deployments/${d.dseq}`, { headers });
             await sleep(2000);
         }
@@ -97,25 +100,50 @@ deployment:
         await sleep(5000);
         try {
             const bidRes = await axios.get(`${API_BASE}/bids?dseq=${currentDeployDseq}`, { headers });
-            bids = bidRes.data.data;
+            bids = bidRes.data.data || [];
             if (bids.length > 0) break;
         } catch (e) {}
     }
 
     if (bids.length === 0) {
+        console.error('❌ Nenhum bid encontrado.');
         await axios.delete(`${API_BASE}/deployments/${currentDeployDseq}`, { headers });
         process.exit(1);
     }
 
-    // 5. Escolher bid (preço justo)
-    bids.sort((a, b) => parseInt(a.price.amount) - parseInt(b.price.amount));
-    let chosenBid = bids[0];
-    if (bids.length >= 3) chosenBid = bids[Math.floor(bids.length / 2)];
+    // 5. Escolher bid (CORRIGIDO)
+    let validBids = bids.map(item => {
+        const b = item.bid ? item.bid : item;
+        return {
+            provider: b.id ? b.id.provider : b.provider,
+            price: b.price,
+            manifest: item.manifest || b.manifest || (bids[0] && bids[0].manifest)
+        };
+    }).filter(b => b.provider && b.price && b.price.amount);
+
+    if (validBids.length === 0) {
+        console.error('❌ Nenhum bid válido com preço encontrado.');
+        await axios.delete(`${API_BASE}/deployments/${currentDeployDseq}`, { headers });
+        process.exit(1);
+    }
+
+    validBids.sort((a, b) => parseInt(a.price.amount) - parseInt(b.price.amount));
+    let chosenBid = validBids[0];
+    if (validBids.length >= 3) chosenBid = validBids[Math.floor(validBids.length / 2)];
     
-    await axios.post(`${API_BASE}/leases`, {
-        manifest: bids[0].manifest,
-        leases: [{ dseq: currentDeployDseq, gseq: 1, oseq: 1, provider: chosenBid.provider }]
-    }, { headers });
+    console.log(`🤝 Aceitando bid do provedor: ${chosenBid.provider}`);
+
+    try {
+        await axios.post(`${API_BASE}/leases`, {
+            manifest: chosenBid.manifest,
+            leases: [{ dseq: currentDeployDseq, gseq: 1, oseq: 1, provider: chosenBid.provider }]
+        }, { headers });
+        console.log('✅ Contrato criado!');
+    } catch (e) {
+        console.error(`❌ Erro ao aceitar bid: ${e.message}`);
+        await axios.delete(`${API_BASE}/deployments/${currentDeployDseq}`, { headers });
+        process.exit(1);
+    }
 
     // 6. Esperar container subir
     let isReady = false;
@@ -132,6 +160,7 @@ deployment:
     }
 
     if (!isReady) {
+        console.error('❌ Container não subiu.');
         await axios.delete(`${API_BASE}/deployments/${currentDeployDseq}`, { headers });
         process.exit(1);
     }
@@ -151,6 +180,7 @@ deployment:
     }
 
     if (!tunnelUrl) {
+        console.error('❌ URL não encontrada nos logs.');
         process.exit(1);
     }
 
