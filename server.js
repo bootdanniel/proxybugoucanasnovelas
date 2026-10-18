@@ -3,6 +3,20 @@ import axios from 'axios';
 
 const app = express();
 const PORT = 3000;
+let tunnelUrl = null;
+
+export function setTunnelUrl(url) {
+    tunnelUrl = url;
+    console.log(`[server] URL do túnel salva na memória: ${url}`);
+}
+
+app.get('/tunnel-url', (req, res) => {
+    if (tunnelUrl) {
+        res.json({ url: tunnelUrl });
+    } else {
+        res.status(404).json({ error: 'URL ainda não disponível' });
+    }
+});
 
 app.get('/proxy', async (req, res) => {
     const targetUrl = req.query.url;
@@ -24,23 +38,19 @@ app.get('/proxy', async (req, res) => {
         const contentType = resp.headers['content-type'] || '';
         res.setHeader('Access-Control-Allow-Origin', '*');
 
-        // Se for arquivo M3U8, reescreve os links
         if (targetUrl.includes('.m3u8') || contentType.includes('mpegurl')) {
             let text = '';
             for await (const chunk of resp.data) { text += chunk; }
-            
             const baseUrl = new URL(targetUrl);
             const out = text.split('\n').map(line => {
                 const l = line.trim();
                 if (!l || l.startsWith('#')) return line;
                 return `/proxy?url=${encodeURIComponent(new URL(l, baseUrl).toString())}`;
             }).join('\n');
-
             res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
             return res.send(out);
         }
 
-        // Se for segmento de vídeo, repassa direto
         if (targetUrl.includes('.png') || targetUrl.includes('.ts') || contentType.includes('image/png')) {
             res.setHeader('Content-Type', 'video/mp2t');
         } else if (contentType) {
