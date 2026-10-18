@@ -68,8 +68,10 @@ deployment:
       profile: proxy
       count: 1
 `;
-    const createRes = await axios.post(`${API_BASE}/deployments`, { data: { sdl } }, { headers });
-    const dseq = createRes.data.data.dseq;
+    
+    // CORREÇÃO AQUI: mudar de const para let
+    let createRes = await axios.post(`${API_BASE}/deployments`, { data: { sdl } }, { headers });
+    let dseq = createRes.data.data.dseq;
     console.log(`✅ Deploy criado! DSEQ: ${dseq}`);
 
     // 4. Aguardar bids
@@ -82,23 +84,32 @@ deployment:
             if (bids.length > 0) break;
         } catch (e) {}
     }
-    if (bids.length === 0) { await axios.delete(`${API_BASE}/deployments/${dseq}`, { headers }); process.exit(1); }
+    
+    if (bids.length === 0) { 
+        await axios.delete(`${API_BASE}/deployments/${dseq}`, { headers }); 
+        process.exit(1); 
+    }
 
     // 5. Tentar até 3 provedores diferentes
     let validBids = bids.map(item => {
         const b = item.bid ? item.bid : item;
         return { provider: b.id ? b.id.provider : b.provider, price: b.price, manifest: item.manifest || (bids[0] && bids[0].manifest) };
     }).filter(b => b.provider && b.price);
+    
     validBids.sort((a, b) => parseInt(a.price.amount) - parseInt(b.price.amount));
 
     for (const bid of validBids.slice(0, 3)) {
         console.log(`🤝 Tentando provedor: ${bid.provider.substring(0, 15)}...`);
+        
         try {
             await axios.post(`${API_BASE}/leases`, {
                 manifest: bid.manifest,
-                leases: [{ dseq, gseq: 1, oseq: 1, provider: bid.provider }]
+                leases: [{ dseq: dseq, gseq: 1, oseq: 1, provider: bid.provider }]
             }, { headers });
-        } catch (e) { continue; }
+        } catch (e) { 
+            console.log(`   Falha no lease com este provedor.`);
+            continue; 
+        }
 
         // 6. Esperar container (30s)
         let isReady = false;
@@ -123,6 +134,7 @@ deployment:
 
         if (isReady) {
             console.log(`✅ Container rodando no provedor ${bid.provider.substring(0, 15)}! URI: ${providerUri}`);
+            
             // 7. Buscar URL do túnel
             for (let i = 0; i < 6; i++) {
                 try {
@@ -130,19 +142,22 @@ deployment:
                     if (resp.data && resp.data.url) {
                         console.log(`🎉 URL Encontrada: ${resp.data.url}`);
                         fs.writeFileSync('proxy_url.txt', resp.data.url, 'utf8');
-                        process.exit(0);
+                        process.exit(0); // Sucesso, encerra o script
                     }
                 } catch (e) {}
                 await sleep(5000);
             }
         } else {
-            console.log(`❌ Provedor ${bid.provider.substring(0, 15)} falhou. Tentando próximo...`);
+            console.log(`❌ Provedor ${bid.provider.substring(0, 15)} falhou em subir. Tentando próximo...`);
             await axios.delete(`${API_BASE}/deployments/${dseq}`, { headers });
-            // Cria novo deploy para o próximo provedor
-            const newD = await axios.post(`${API_BASE}/deployments`, { data: { sdl } }, { headers });
-            dseq = newD.data.data.dseq;
+            
+            // Cria um novo deploy para tentar o próximo provedor
+            createRes = await axios.post(`${API_BASE}/deployments`, { data: { sdl } }, { headers });
+            dseq = createRes.data.data.dseq; // Agora funciona, pois dseq é 'let'
+            console.log(`   Novo deploy criado: ${dseq}`);
         }
     }
+    
     console.error('❌ Todos os provedores falharam.');
     process.exit(1);
 }
