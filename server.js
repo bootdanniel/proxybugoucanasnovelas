@@ -1,5 +1,5 @@
 import express from 'express';
-import fetch from 'node-fetch';
+import axios from 'axios';
 
 const app = express();
 const PORT = 3000;
@@ -9,44 +9,48 @@ app.get('/proxy', async (req, res) => {
     if (!targetUrl) return res.status(400).send('Missing url');
 
     try {
-        const response = await fetch(targetUrl, {
+        const resp = await axios.get(targetUrl, {
+            responseType: 'stream',
+            timeout: 60000,
+            maxContentLength: Infinity,
+            validateStatus: () => true,
             headers: {
                 'Referer': 'https://embed.bugoumods.com/',
                 'Origin': 'https://embed.bugoumods.com',
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36'
             }
         });
 
-        const contentType = response.headers.get('content-type') || '';
-        
+        const contentType = resp.headers['content-type'] || '';
+        res.setHeader('Access-Control-Allow-Origin', '*');
+
+        // Se for arquivo M3U8, reescreve os links
         if (targetUrl.includes('.m3u8') || contentType.includes('mpegurl')) {
-            let text = await response.text();
+            let text = '';
+            for await (const chunk of resp.data) { text += chunk; }
+            
             const baseUrl = new URL(targetUrl);
-            text = text.split('\n').map(line => {
-                let l = line.trim();
-                if (!l) return line;
-                if (l.startsWith('#')) return line;
-                const abs = new URL(l, baseUrl).toString();
-                return `/proxy?url=${encodeURIComponent(abs)}`;
+            const out = text.split('\n').map(line => {
+                const l = line.trim();
+                if (!l || l.startsWith('#')) return line;
+                return `/proxy?url=${encodeURIComponent(new URL(l, baseUrl).toString())}`;
             }).join('\n');
 
-            res.setHeader('Access-Control-Allow-Origin', '*');
             res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
-            return res.send(text);
+            return res.send(out);
         }
 
-        res.setHeader('Access-Control-Allow-Origin', '*');
-        if (targetUrl.includes('.png') || targetUrl.includes('.ts')) {
+        // Se for segmento de vídeo, repassa direto
+        if (targetUrl.includes('.png') || targetUrl.includes('.ts') || contentType.includes('image/png')) {
             res.setHeader('Content-Type', 'video/mp2t');
-        } else {
+        } else if (contentType) {
             res.setHeader('Content-Type', contentType);
         }
         
-        response.body.pipe(res);
+        resp.data.pipe(res);
     } catch (e) {
         res.status(500).send(e.message);
     }
 });
 
-// OUVINDO EM 0.0.0.0 PARA PERMITIR CONEXÕES EXTERNAS
 app.listen(PORT, '0.0.0.0', () => console.log(`Proxy rodando na porta ${PORT}`));

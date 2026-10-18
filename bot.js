@@ -12,25 +12,17 @@ async function runBot() {
     let chosenKey = null;
     let currentDeployDseq = null;
 
-    // 1. Escolher conta com saldo > $0.60
+    // 1. Escolher conta
     for (const key of API_KEYS) {
         try {
             const res = await axios.get(`${API_BASE}/balances`, { headers: { 'x-api-key': key } });
             const balanceUSD = res.data.data.balance / 1000000;
             console.log(`💰 Conta ${key.substring(15, 25)}... tem $${balanceUSD.toFixed(2)}`);
-            if (balanceUSD > 0.60) {
-                chosenKey = key;
-                console.log(`✅ Conta escolhida!`);
-                break;
-            }
+            if (balanceUSD > 0.60) { chosenKey = key; console.log(`✅ Conta escolhida!`); break; }
         } catch (e) { console.log(`⚠️ Erro na conta: ${e.message}`); }
     }
 
-    if (!chosenKey) {
-        console.error('❌ Nenhuma conta com saldo > $0.60. Abortando.');
-        process.exit(1);
-    }
-
+    if (!chosenKey) { console.error('❌ Nenhuma conta com saldo > $0.60.'); process.exit(1); }
     const headers = { 'x-api-key': chosenKey, 'Content-Type': 'application/json' };
 
     // 2. Fechar deploys antigos
@@ -45,7 +37,7 @@ async function runBot() {
         }
     } catch (e) { console.log(`⚠️ Erro ao limpar: ${e.message}`); }
 
-    // 3. Criar novo deploy (SDL Ajustado para 2 vCPU / 4Gi RAM e Streaming)
+    // 3. Criar deploy
     console.log('🚀 Criando novo deploy...');
     const sdl = `
 ---
@@ -82,17 +74,13 @@ deployment:
       profile: proxy
       count: 1
 `;
-    
     try {
         const createRes = await axios.post(`${API_BASE}/deployments`, { data: { sdl, deposit: 0.50 } }, { headers });
         currentDeployDseq = createRes.data.data.dseq;
         console.log(`✅ Deploy criado! DSEQ: ${currentDeployDseq}`);
-    } catch (e) {
-        console.error(`❌ Erro ao criar: ${e.message}`);
-        process.exit(1);
-    }
+    } catch (e) { console.error(`❌ Erro ao criar: ${e.message}`); process.exit(1); }
 
-    // 4. Polling de bids (máx 90s)
+    // 4. Bids
     let bids = [];
     for (let i = 0; i < 18; i++) {
         await sleep(5000);
@@ -102,60 +90,45 @@ deployment:
             if (bids.length > 0) break;
         } catch (e) {}
     }
-
-    if (bids.length === 0) {
-        console.error('❌ Nenhum bid encontrado.');
-        await axios.delete(`${API_BASE}/deployments/${currentDeployDseq}`, { headers });
-        process.exit(1);
-    }
+    if (bids.length === 0) { await axios.delete(`${API_BASE}/deployments/${currentDeployDseq}`, { headers }); process.exit(1); }
 
     // 5. Escolher bid
     let validBids = bids.map(item => {
         const b = item.bid ? item.bid : item;
-        return {
-            provider: b.id ? b.id.provider : b.provider,
-            price: b.price,
-            manifest: item.manifest || b.manifest || (bids[0] && bids[0].manifest)
-        };
+        return { provider: b.id ? b.id.provider : b.provider, price: b.price, manifest: item.manifest || b.manifest || (bids[0] && bids[0].manifest) };
     }).filter(b => b.provider && b.price && b.price.amount);
-
     validBids.sort((a, b) => parseInt(a.price.amount) - parseInt(b.price.amount));
     let chosenBid = validBids[0];
     if (validBids.length >= 3) chosenBid = validBids[Math.floor(validBids.length / 2)];
-
+    
     console.log(`🤝 Aceitando bid do provedor: ${chosenBid.provider}`);
     try {
-        await axios.post(`${API_BASE}/leases`, {
-            manifest: chosenBid.manifest,
-            leases: [{ dseq: currentDeployDseq, gseq: 1, oseq: 1, provider: chosenBid.provider }]
-        }, { headers });
+        await axios.post(`${API_BASE}/leases`, { manifest: chosenBid.manifest, leases: [{ dseq: currentDeployDseq, gseq: 1, oseq: 1, provider: chosenBid.provider }] }, { headers });
         console.log('✅ Contrato criado!');
-    } catch (e) {
-        console.error(`❌ Erro ao aceitar bid: ${e.message}`);
-        await axios.delete(`${API_BASE}/deployments/${currentDeployDseq}`, { headers });
-        process.exit(1);
-    }
+    } catch (e) { await axios.delete(`${API_BASE}/deployments/${currentDeployDseq}`, { headers }); process.exit(1); }
 
-    // 6. Esperar container subir (AUMENTADO PARA 300s)
-    console.log('⏳ Aguardando container... (Aumentado para 5 minutos)');
+    // 6. Esperar container (CORRIGIDO: services como objeto e log de debug)
+    console.log('⏳ Aguardando container... (5 minutos)');
     let isReady = false;
-    for (let i = 0; i < 60; i++) { // 60 * 5s = 300s
+    for (let i = 0; i < 60; i++) {
         await sleep(5000);
         try {
             const statusRes = await axios.get(`${API_BASE}/deployments/${currentDeployDseq}`, { headers });
-            const leases = statusRes.data.data.leases;
-            if (leases && leases.length > 0 && leases[0].status.services[0].ready_replicas >= 1) {
-                isReady = true;
-                break;
+            const dep = statusRes.data?.data || statusRes.data || {};
+            const leases = dep.leases || [];
+            const services = leases[0]?.status?.services || {};
+            const list = Array.isArray(services) ? services : Object.values(services);
+            
+            if (i % 6 === 0) console.log(`   status[${i}]:`, JSON.stringify(list.map(s => ({ name: s.name, ready: s.ready_replicas, avail: s.available }))));
+            
+            if (list.some(s => (Number(s.ready_replicas) || 0) >= 1 || (Number(s.available) || 0) >= 1)) { 
+                isReady = true; 
+                break; 
             }
-        } catch (e) {}
+        } catch (e) { if (i % 6 === 0) console.log(`   aviso ao ler status: ${e.message}`); }
     }
 
-    if (!isReady) {
-        console.error('❌ Container não subiu após 5 minutos.');
-        await axios.delete(`${API_BASE}/deployments/${currentDeployDseq}`, { headers });
-        process.exit(1);
-    }
+    if (!isReady) { console.error('❌ Container não subiu após 5 minutos.'); await axios.delete(`${API_BASE}/deployments/${currentDeployDseq}`, { headers }); process.exit(1); }
 
     // 7. Pegar URL
     let tunnelUrl = null;
@@ -171,14 +144,9 @@ deployment:
         await sleep(5000);
     }
 
-    if (!tunnelUrl) {
-        console.error('❌ URL não encontrada nos logs.');
-        process.exit(1);
-    }
-
+    if (!tunnelUrl) { console.error('❌ URL não encontrada nos logs.'); process.exit(1); }
     console.log(`🎉 URL Encontrada: ${tunnelUrl}`);
     fs.writeFileSync('proxy_url.txt', tunnelUrl, 'utf8');
     console.log('✅ proxy_url.txt salvo com sucesso!');
 }
-
 runBot();

@@ -1,8 +1,9 @@
 {
-  "name": "akash-bot",
+  "name": "akash-proxy-bot",
   "version": "2.0.0",
   "type": "module",
   "dependencies": {
-    "axios": "^1.6.8"
+    "axios": "^1.6.8",
+    "express": "^4.19.2"
   }
 }
