@@ -1,12 +1,10 @@
 name: Akash Proxy Bot
 on:
-  workflow_dispatch: # Permite disparar manualmente via cron-job.org ou botão
+  workflow_dispatch:
 
 jobs:
   run-bot:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write # Permissão para comitar o proxy_url.txt
     steps:
       - name: Checkout
         uses: actions/checkout@v3
@@ -23,11 +21,3 @@ jobs:
         env:
           AKASH_API_KEYS: ${{ secrets.AKASH_API_KEYS }}
         run: node bot.js
-
-      - name: Comitar novo TXT
-        run: |
-          git config --local user.email "action@github.com"
-          git config --local user.name "Akash Bot"
-          git add proxy_url.txt
-          git commit -m "🤖 Atualizando URL do Proxy [skip ci]" || echo "Sem mudanças"
-          git push
